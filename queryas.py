@@ -1,29 +1,31 @@
-# query.py
+# queryas.py
 
-# need to get a vercross api token
-# https://api-docs.veracross.com/docs/docs/d50279dec5fd1-list-students
+"""
+- gets all users via assetsonar (which pulls from azure connector)
+- saves email, first, last, fullname, username to .json
+"""
 
 from dotenv import load_dotenv
-import json
-import os
 import requests
-import sys
-import time
 import urllib3
-
-load_dotenv()
-VC_TOKEN = os.getenv("VC_TOKEN")
-VC_URL = os.getenv("VC_URL")
+import sys
+import os
+import json
+import time
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TIMESTAMP_PATH = os.path.join(SCRIPT_DIR, "last_run.timestamp")
 LOOKUP_PATH = os.path.join(SCRIPT_DIR, "lookup.json")
 
+load_dotenv()
+ASSETSONAR_TOKEN = os.getenv("AS_TOKEN")
+ASSETSONAR_URL = os.getenv("AS_URL")
+
 TESTING_MODE = False
 
 # ============================================================================================================================================================
 
-def run_check() -> bool:
+def run_check():
   try:
     with open(TIMESTAMP_PATH, "r") as f:
       last_epoch = int(f.read().strip())
@@ -33,41 +35,38 @@ def run_check() -> bool:
     return True
   return int(time.time()) - last_epoch > 604800
 
-def get_members(page_num: int) -> None:
-  url = f"{VC_URL}/school_route/v3/students" # <------ change to correct school_route endpoint
+def get_members(page_num):
+  url = f"{ASSETSONAR_URL}/members.api?page={page_num}"
   headers = {
-    "X-Page-Number": page_num,
-    "X-Page-Size": 100,
-    "X-API-Value-Lists": "include",
-    "X-API-Revision": "",
-    "Accept": "application/json",
-    "Authorization": f"Bearer {VC_TOKEN}"
+    "token": ASSETSONAR_TOKEN,
+    "content-type": "application/x-www-form-urlencoded"
+  }
+  params = {
+    "page": page_num
   }
 
   try:
-    response = requests.get(url, headers=headers, timeout=30, verify=False)
+    response = requests.get(url, headers=headers, params=params, timeout=30, verify=False)
     response.raise_for_status()
     return response.json()
   except:
-    print(f"Error fetching page {page_num}: {sys.stderr}", file=sys.stderr)
+    print(f"Error fetching members page {page_num}: {sys.stderr}", file=sys.stderr)
     if response is not None:
       print(f"Response content: {response.text}", file=sys.stderr)
   return
 
-def extract_entry(member: dict) -> dict:
+def extract_entry(member):
   entry = {}
-  entry["email"] = member.get("email_1")
+  entry["email"] = member.get("email")
   entry["first"] = member.get("first_name")
   entry["last"] = member.get("last_name")
-  entry["full"] = f"{entry['first']} {entry['last']}"
-  entry["username"] = entry["email"].split("@")[0]
-  entry["grade"] = member.get("grade_level")
+  entry["full"] = member.get("full_name")
+  entry["username"] = member.get("email").split("@")[0]
+  entry["EGY"] = ""
   return entry
 
-def update_progress_bar(current: int, total: int, bar_length: int = 40) -> None:
-  if total is None or total == 0:
-    sys.stdout.write(f'\rFetching pages... ({current} pages)')
-    sys.stdout.flush()
+def update_progress_bar(current, total, bar_length=40):
+  if total == 0:
     return
 
   current = min(current, total)
@@ -79,7 +78,7 @@ def update_progress_bar(current: int, total: int, bar_length: int = 40) -> None:
   sys.stdout.flush()
   return
 
-def create_timestamp() -> None:
+def create_timestamp():
   epoch = int(time.time())
   epoch_str = str(epoch)
   try:
@@ -89,6 +88,7 @@ def create_timestamp() -> None:
   except Exception as e:
     print(f"Error writing .timestamp: {e}")
   return
+
 
 # ============================================================================================================================================================
 
@@ -100,43 +100,36 @@ def main():
 
   # check time since last run
   if run_check():
-    # get all students from veracross
+    # get all members from assetsonar
     members = []
     current_page = 1
-
-    # keep fetching until we hit a page with no data or optional max is reached
-    max_pages = int(os.getenv("MAX_PAGES", "0"))  # 0 == no limit
-
-    while True:
-      print(f"Fetching page {current_page}...")
+    total_pages = 1
+    while current_page <= total_pages:
+      # print(f"Fetching page {current_page}...")
       page_data = get_members(current_page)
 
       if page_data is None:
-        print("Failed to retrieve page, aborting")
+        print("Failed to retrieve members page data, aborting")
         break
 
       # validate and add to output list
-      members_on_page = page_data.get("data", [])
+      members_on_page = page_data.get("members", [])
       if not isinstance(members_on_page, list):
         break
-      if not members_on_page:
-        if current_page == 1:
-          print("No data found on page, aborting")
-        break
+      for member in members_on_page:
+        members.append(member)
 
-      members.extend(members_on_page)
-
-      # update progress bar
-      update_progress_bar(current_page, None)
-
+      # handle pagination
+      total_pages = page_data.get("total_pages", current_page)
       current_page += 1
-      # stop if we hit explicit limit (testing)
-      if max_pages and current_page > max_pages:
-        print(f"Reached max pages limit of {max_pages}")
-        break
+      update_progress_bar(current_page - 1, total_pages)
 
       if TESTING_MODE:
         if current_page > 5:
+          print("No subsequent pages found")
+          break
+      else:
+        if not members_on_page and current_page > 1:
           print("No subsequent pages found")
           break
 
@@ -145,9 +138,13 @@ def main():
     for member in members:
       members_clean.append(extract_entry(member))
 
+    # write to json
+    # with open("raw.json", "w") as f:
+      # json.dump(members, f, indent=2, sort_keys=True)
     with open(LOOKUP_PATH, "w") as f:
       json.dump(members_clean, f, indent=2, sort_keys=False)
-    print(f"Saved {len(members_clean)} users to ./lookup.json")
+
+    print(f"Saved {len(members_clean)} users to ./clean.json")
 
     create_timestamp()
 

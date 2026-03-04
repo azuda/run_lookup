@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import pandas as pd
+
 import query
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))

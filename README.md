@@ -26,3 +26,11 @@ source ~/.zshrc
 ```bash
 lookup -h
 ```
+
+### pagination details
+The Veracross API responses don't include a `total_pages` field. The script therefore continues requesting pages until an empty page is returned. If you need to cap the number of pages fetched (for development or to avoid runaway requests) set the `MAX_PAGES` environment variable to a positive integer. For example:
+
+```bash
+export MAX_PAGES=10   # fetch at most 10 pages
+lookup
+```
