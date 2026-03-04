@@ -27,24 +27,14 @@ TESTING_MODE = False
 # ==================================================================================
 
 def run_check():
-  current_epoch = int(time.time())
-  if os.path.isfile(TIMESTAMP_PATH):
+  try:
     with open(TIMESTAMP_PATH, "r") as f:
-      last_epoch = int(f.read())
-      # print(f"Current run:\t{datetime.fromtimestamp(current_epoch)}")
-      # print(f"Last run:\t{datetime.fromtimestamp(last_epoch)}")
-      if current_epoch - last_epoch < 604800:
-        # only postpone run if lookup table exists
-        if os.path.isfile(LOOKUP_PATH):
-          # print("Lookup table exists")
-          return False
-        else:
-          # print("QUERYING - lookup.json not found")
-          return True
-  else:
-    # print("QUERYING - last_run.timestamp not found")
+      last_epoch = int(f.read().strip())
+  except (OSError, ValueError):
     return True
-  return False
+  if not os.path.isfile(LOOKUP_PATH):
+    return True
+  return int(time.time()) - last_epoch > 604800
 
 def get_members(page_num):
   url = f"{ASSETSONAR_URL}/members.api?page={page_num}"
