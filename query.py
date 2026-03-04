@@ -12,7 +12,6 @@ import sys
 import os
 import json
 import time
-from datetime import datetime
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TIMESTAMP_PATH = os.path.join(SCRIPT_DIR, "last_run.timestamp")
@@ -24,7 +23,7 @@ ASSETSONAR_URL = os.getenv("AS_URL")
 
 TESTING_MODE = False
 
-# ==================================================================================
+# ============================================================================================================================================================
 
 def run_check():
   try:
@@ -63,6 +62,7 @@ def extract_entry(member):
   entry["last"] = member.get("last_name")
   entry["full"] = member.get("full_name")
   entry["username"] = member.get("email").split("@")[0]
+  entry["EGY"] = ""
   return entry
 
 def update_progress_bar(current, total, bar_length=40):
@@ -90,7 +90,7 @@ def create_timestamp():
   return
 
 
-# ==================================================================================
+# ============================================================================================================================================================
 
 def main():
   global TESTING_MODE
@@ -150,7 +150,7 @@ def main():
 
     print("Done\n")
 
-# ==================================================================================
+# ============================================================================================================================================================
 
 if __name__ == "__main__":
   urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)

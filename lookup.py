@@ -1,15 +1,15 @@
 # lookup.py
 
 """
-cli tool for searching all users by email or name
+- search users by email or name from .json created by query.py
+- print results as df
 """
 
-import os
-import query
-import json
 import argparse
-import re
+import json
+import os
 import pandas as pd
+import query
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOOKUP_PATH = os.path.join(SCRIPT_DIR, "lookup.json")
@@ -18,8 +18,6 @@ if not os.path.isfile(LOOKUP_PATH):
   query.main()
 with open(LOOKUP_PATH, "r") as f:
   ALL_USERS = json.load(f)
-
-
 
 def lookup(first, last):
   global ALL_USERS
@@ -30,8 +28,6 @@ def lookup(first, last):
 
   # 2 args provided
   if last:
-    # re_first = re.compile(r"\b" + re.escape(first) + r"\b", re.IGNORECASE)
-    # re_last = re.compile(r"\b" + re.escape(last) + r"\b", re.IGNORECASE)
     query1 = first.lower()
     query2 = last.lower()
     for entry in ALL_USERS:
@@ -78,8 +74,6 @@ def main():
   else:
     df = pd.DataFrame(results).sort_values("last")
     print(df)
-
-
 
 if __name__ == "__main__":
   main()
