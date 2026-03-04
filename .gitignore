@@ -2,5 +2,7 @@ __pycache__/
 .venv/
 .DS_Store
 .env
+Thumbs.db
+
 *.json
 *.timestamp
