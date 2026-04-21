@@ -1,25 +1,21 @@
 # query.py
 
 """
-- gets all users via assetsonar (which pulls from azure connector)
-- saves email, first, last, fullname, username to .json
+- gets all users in jamf via api
+- write email, first, last, fullname, username to .json
 """
 
-from dotenv import load_dotenv
-import requests
-import urllib3
-import sys
-import os
 import json
+import os
+import requests
 import time
+import urllib3
+
+from jamf_credential import JAMF_URL, check_token_expiration, get_token, invalidate_token
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TIMESTAMP_PATH = os.path.join(SCRIPT_DIR, "last_run.timestamp")
 LOOKUP_PATH = os.path.join(SCRIPT_DIR, "lookup.json")
-
-load_dotenv()
-ASSETSONAR_TOKEN = os.getenv("AS_TOKEN")
-ASSETSONAR_URL = os.getenv("AS_URL")
 
 TESTING_MODE = False
 
@@ -35,48 +31,30 @@ def run_check():
     return True
   return int(time.time()) - last_epoch > 604800
 
-def get_members(page_num):
-  url = f"{ASSETSONAR_URL}/members.api?page={page_num}"
+def get(endpoint, access_token, token_expiration_epoch):
+  access_token, token_expiration_epoch = check_token_expiration(access_token, token_expiration_epoch)
+
+  url = f"{JAMF_URL}{endpoint}"
   headers = {
-    "token": ASSETSONAR_TOKEN,
-    "content-type": "application/x-www-form-urlencoded"
+    "accept": "application/json",
+    "authorization": f"Bearer {access_token}"
   }
-  params = {
-    "page": page_num
-  }
+  response = requests.get(url, headers=headers, verify=False)
+  return response, access_token, token_expiration_epoch
 
-  try:
-    response = requests.get(url, headers=headers, params=params, timeout=30, verify=False)
-    response.raise_for_status()
-    return response.json()
-  except:
-    print(f"Error fetching members page {page_num}: {sys.stderr}", file=sys.stderr)
-    if response is not None:
-      print(f"Response content: {response.text}", file=sys.stderr)
-  return
+def get_first_last(full):
+  parts = full.split()
+  return parts[0], parts[-1] if len(parts) > 1 else ""
 
-def extract_entry(member):
+def parse(user):
   entry = {}
-  entry["email"] = member.get("email")
-  entry["first"] = member.get("first_name")
-  entry["last"] = member.get("last_name")
-  entry["full"] = member.get("full_name")
-  entry["username"] = member.get("email").split("@")[0]
-  entry["EGY"] = ""
+  entry["email"] = user.get("email")
+  entry["first"] = user.get("realname").split()[0] if user.get("realname") else ""
+  entry["last"] = user.get("realname").split()[-1] if user.get("realname") else ""
+  entry["full"] = user.get("realname")
+  entry["username"] = user.get("email").split("@")[0]
+  entry["EGY"] = user.get("position").split("EGY")[-1] if "EGY" in user.get("position") else ""
   return entry
-
-def update_progress_bar(current, total, bar_length=40):
-  if total == 0:
-    return
-
-  current = min(current, total)
-  progress = current / total
-  filled_blocks = int(round(bar_length * progress))
-  bar = '=' * filled_blocks + '-' * (bar_length - filled_blocks)
-  percent = round(progress * 100, 1)
-  sys.stdout.write(f'\rFetching pages... [{bar}] {percent}% ({current}/{total} pages)')
-  sys.stdout.flush()
-  return
 
 def create_timestamp():
   epoch = int(time.time())
@@ -89,66 +67,71 @@ def create_timestamp():
     print(f"Error writing .timestamp: {e}")
   return
 
-
 # ============================================================================================================================================================
 
 def main():
-  global TESTING_MODE
+  if not run_check():
+    return
 
-  if TESTING_MODE:
-    print("=== TESTING MODE ENABLED: Getting 5 pages max ===")
+  # create jamf access token
+  access_token, expires_in = get_token()
+  token_expiration_epoch = int(time.time()) + expires_in
+  print(f"Token valid for {expires_in} seconds")
 
-  # check time since last run
-  if run_check():
-    # get all members from assetsonar
-    members = []
-    current_page = 1
-    total_pages = 1
-    while current_page <= total_pages:
-      # print(f"Fetching page {current_page}...")
-      page_data = get_members(current_page)
+  # print jamf pro version
+  version_url = f"{JAMF_URL}/api/v1/jamf-pro-version"
+  headers = {"Authorization": f"Bearer {access_token}"}
+  version = requests.get(version_url, headers=headers, verify=False)
+  print("Jamf Pro version:", version.json()["version"])
 
-      if page_data is None:
-        print("Failed to retrieve members page data, aborting")
-        break
+  # get all users + handle pagination
+  raw = { "total": 0, "responses": [] }
+  page = 0
+  endpoint = f"/api/v1/users?page={page}&page-size=1000&sort=realname%3Aasc&platform=false"
+  response, access_token, token_expiration_epoch = get(endpoint, access_token, token_expiration_epoch)
+  # do while hasNext is true
+  while True:
+    raw["responses"].extend(response.json()["results"])
+    if not response.json()["hasNext"]:
+      break
+    page += 1
+    endpoint = f"/api/v1/users?page={page}&page-size=1000&sort=realname%3Aasc&platform=false"
+    response, access_token, token_expiration_epoch = get(endpoint, access_token, token_expiration_epoch)
 
-      # validate and add to output list
-      members_on_page = page_data.get("members", [])
-      if not isinstance(members_on_page, list):
-        break
-      for member in members_on_page:
-        members.append(member)
+  # # write raw
+  # for u in raw["responses"]:
+  #   raw["total"] += 1
+  # with open("raw.json", "w") as f:
+  #   json.dump(users, f, indent=2, sort_keys=True)
 
-      # handle pagination
-      total_pages = page_data.get("total_pages", current_page)
-      current_page += 1
-      update_progress_bar(current_page - 1, total_pages)
+  # cleanup raw
+  users = []
+  for u in raw["responses"]:
+    cleaned = parse(u)
+    users.append(cleaned)
+  # delete bad entries
+  for i in range(len(users)):
+    u = users[i]
+    if not u["email"] or u["first"] == "" or u["last"] == "":
+      users[i] = None
+  users = [u for u in users if u is not None]
 
-      if TESTING_MODE:
-        if current_page > 5:
-          print("No subsequent pages found")
-          break
-      else:
-        if not members_on_page and current_page > 1:
-          print("No subsequent pages found")
-          break
+  # dedup
+  seen = set()
+  unique_users = []
+  for u in users:
+    identifier = (u["email"], u["first"], u["last"])
+    if identifier not in seen:
+      seen.add(identifier)
+      unique_users.append(u)
+  users = unique_users
 
-    # extract name + email to clean list
-    members_clean = []
-    for member in members:
-      members_clean.append(extract_entry(member))
+  # write cleaned
+  with open("lookup.json", "w") as f:
+    json.dump(users, f, indent=2, sort_keys=False)
 
-    # write to json
-    # with open("raw.json", "w") as f:
-      # json.dump(members, f, indent=2, sort_keys=True)
-    with open(LOOKUP_PATH, "w") as f:
-      json.dump(members_clean, f, indent=2, sort_keys=False)
-
-    print(f"Saved {len(members_clean)} users to ./clean.json")
-
-    create_timestamp()
-
-    print("Done\n")
+  create_timestamp()
+  print("Done query.py\n")
 
 # ============================================================================================================================================================
 
