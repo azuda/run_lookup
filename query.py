@@ -7,6 +7,7 @@
 
 import json
 import os
+import re
 import requests
 import time
 import urllib3
@@ -47,14 +48,30 @@ def get_first_last(full):
   return parts[0], parts[-1] if len(parts) > 1 else ""
 
 def parse(user):
-  entry = {}
-  entry["email"] = user.get("email")
-  entry["first"] = user.get("realname").split()[0] if user.get("realname") else ""
-  entry["last"] = user.get("realname").split()[-1] if user.get("realname") else ""
-  entry["full"] = user.get("realname")
-  entry["username"] = user.get("email").split("@")[0]
-  entry["EGY"] = user.get("position").split("EGY")[-1] if "EGY" in user.get("position") else ""
-  return entry
+  username = user.get("username", "")
+  if username and (re.search(r"@", username) or re.search(r"-\d", username)):
+    return None
+
+  return {
+    "email": user.get("email"),
+    "first": user.get("realname").split()[0] if user.get("realname") else "",
+    "last": user.get("realname").split()[-1] if user.get("realname") else "",
+    "full": user.get("realname"),
+    "username": user.get("email").split("@")[0] if user.get("email") else user.get("username"),
+    "EGY": user.get("position").split("EGY")[-1] if "EGY" in user.get("position") else "",
+    # "building": user.get("building").split("Rundle")[-1]
+  }
+
+def dedup(users):
+  seen = set()
+  unique_users = []
+  for u in users:
+    identifier = (u["email"], u["first"], u["last"])
+    if identifier not in seen:
+      seen.add(identifier)
+      unique_users.append(u)
+  users = unique_users
+  return users
 
 def create_timestamp():
   epoch = int(time.time())
@@ -70,7 +87,7 @@ def create_timestamp():
 # ============================================================================================================================================================
 
 def main():
-  if not run_check():
+  if not run_check() and TESTING_MODE == False:
     return
 
   # create jamf access token
@@ -98,37 +115,21 @@ def main():
     endpoint = f"/api/v1/users?page={page}&page-size=1000&sort=realname%3Aasc&platform=false"
     response, access_token, token_expiration_epoch = get(endpoint, access_token, token_expiration_epoch)
 
-  # # write raw
-  # for u in raw["responses"]:
-  #   raw["total"] += 1
-  # with open("raw.json", "w") as f:
-  #   json.dump(users, f, indent=2, sort_keys=True)
+  # write raw
+  for _ in raw["responses"]:
+    raw["total"] += 1
+  with open("raw.json", "w") as f:
+    json.dump(response.json(), f, indent=2, sort_keys=True)
 
   # cleanup raw
-  users = []
-  for u in raw["responses"]:
-    cleaned = parse(u)
-    users.append(cleaned)
-  # delete bad entries
-  for i in range(len(users)):
-    u = users[i]
-    if not u["email"] or u["first"] == "" or u["last"] == "":
-      users[i] = None
-  users = [u for u in users if u is not None]
-
-  # dedup
-  seen = set()
-  unique_users = []
-  for u in users:
-    identifier = (u["email"], u["first"], u["last"])
-    if identifier not in seen:
-      seen.add(identifier)
-      unique_users.append(u)
-  users = unique_users
+  users = [parse(u) for u in raw["responses"]]
+  users = [u for u in users if u and u["email"] and u["first"] and u["last"]]
+  users_final = dedup(users)
 
   # write cleaned
   with open("lookup.json", "w") as f:
-    json.dump(users, f, indent=2, sort_keys=False)
+    json.dump(users_final, f, indent=2, sort_keys=False)
+  print(f"Successfully created lookup.json with {len(users_final)} entries")
 
   create_timestamp()
   print("Done query.py\n")
