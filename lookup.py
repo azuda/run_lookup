@@ -10,6 +10,7 @@ import json
 import os
 import pandas as pd
 import query
+import urllib3
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOOKUP_PATH = os.path.join(SCRIPT_DIR, "lookup.json")
@@ -76,4 +77,5 @@ def main():
     print(df)
 
 if __name__ == "__main__":
+  urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
   main()
