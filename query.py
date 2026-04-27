@@ -5,6 +5,7 @@
 - write email, first, last, fullname, username to .json
 """
 
+from datetime import date
 import json
 import os
 import re
@@ -47,6 +48,26 @@ def get_first_last(full):
   parts = full.split()
   return parts[0], parts[-1] if len(parts) > 1 else ""
 
+def get_position(full):
+  pos = full.get("position")
+  email = full.get("email")
+  if email and re.search(r"@rundle.ab.ca", email, re.IGNORECASE):
+    return "Staff"
+  if not pos:
+    return None
+  match = re.search(r'(EGY)(\d{4})', pos, re.IGNORECASE)
+  if match:
+    egy = int(match.group(2))
+    today = date.today()
+    current_grad_year = today.year if today.month < 9 else today.year + 1
+    grade = 12 - (egy - current_grad_year)
+    if grade == 0:
+      return "K"
+    if 1 <= grade <= 12:
+      return f"Grade {grade}"
+    return "Alumni"
+  return None
+
 def parse(user):
   username = user.get("username", "")
   if username and (re.search(r"@", username) or re.search(r"-\d", username)):
@@ -58,7 +79,7 @@ def parse(user):
     "last": user.get("realname").split()[-1] if user.get("realname") else "",
     "full": user.get("realname"),
     "username": user.get("email").split("@")[0] if user.get("email") else user.get("username"),
-    "EGY": user.get("position").split("EGY")[-1] if "EGY" in user.get("position") else "",
+    "position": get_position(user),
     # "building": user.get("building").split("Rundle")[-1]
   }
 
