@@ -6,14 +6,16 @@
 """
 
 from datetime import date
+from jamf_credential import JAMF_URL, check_token_expiration, get_token, invalidate_token
 import json
 import os
 import re
 import requests
 import time
+import truststore
 import urllib3
 
-from jamf_credential import JAMF_URL, check_token_expiration, get_token, invalidate_token
+truststore.inject_into_ssl()
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TIMESTAMP_PATH = os.path.join(SCRIPT_DIR, "last_run.timestamp")
@@ -22,6 +24,19 @@ LOOKUP_PATH = os.path.join(SCRIPT_DIR, "lookup.json")
 TESTING_MODE = False
 
 # ============================================================================================================================================================
+
+def make_session():
+  session = requests.Session()
+  retry = urllib3.util.retry.Retry(
+    total=3,
+    backoff_factor=0.5,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET", "PATCH"],
+    raise_on_status=False,
+  )
+  adapter = requests.adapters.HTTPAdapter(max_retries=retry)
+  session.mount("https://", adapter)
+  return session
 
 def run_check():
   try:
@@ -33,7 +48,7 @@ def run_check():
     return True
   return int(time.time()) - last_epoch > 604800
 
-def get(endpoint, access_token, token_expiration_epoch):
+def get(endpoint, access_token, token_expiration_epoch, session):
   access_token, token_expiration_epoch = check_token_expiration(access_token, token_expiration_epoch)
 
   url = f"{JAMF_URL}{endpoint}"
@@ -41,7 +56,7 @@ def get(endpoint, access_token, token_expiration_epoch):
     "accept": "application/json",
     "authorization": f"Bearer {access_token}"
   }
-  response = requests.get(url, headers=headers, verify=False)
+  response = session.get(url, headers=headers)
   return response, access_token, token_expiration_epoch
 
 def get_first_last(full):
@@ -119,14 +134,15 @@ def main():
   # print jamf pro version
   version_url = f"{JAMF_URL}/api/v1/jamf-pro-version"
   headers = {"Authorization": f"Bearer {access_token}"}
-  version = requests.get(version_url, headers=headers, verify=False)
+  version = requests.get(version_url, headers=headers)
   print("Jamf Pro version:", version.json()["version"])
 
   # get all users + handle pagination
+  session = make_session()
   raw = { "total": 0, "responses": [] }
   page = 0
   endpoint = f"/api/v1/users?page={page}&page-size=1000&sort=realname%3Aasc&platform=false"
-  response, access_token, token_expiration_epoch = get(endpoint, access_token, token_expiration_epoch)
+  response, access_token, token_expiration_epoch = get(endpoint, access_token, token_expiration_epoch, session)
   # do while hasNext is true
   while True:
     raw["responses"].extend(response.json()["results"])
@@ -134,7 +150,7 @@ def main():
       break
     page += 1
     endpoint = f"/api/v1/users?page={page}&page-size=1000&sort=realname%3Aasc&platform=false"
-    response, access_token, token_expiration_epoch = get(endpoint, access_token, token_expiration_epoch)
+    response, access_token, token_expiration_epoch = get(endpoint, access_token, token_expiration_epoch, session)
 
   # write raw
   for _ in raw["responses"]:
@@ -158,5 +174,4 @@ def main():
 # ============================================================================================================================================================
 
 if __name__ == "__main__":
-  urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
   main()
