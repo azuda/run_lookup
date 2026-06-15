@@ -14,23 +14,16 @@ import query
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOOKUP_PATH = os.path.join(SCRIPT_DIR, "lookup.json")
 
-if not os.path.isfile(LOOKUP_PATH):
-  query.main()
-with open(LOOKUP_PATH, "r") as f:
-  ALL_USERS = json.load(f)
-
-def lookup(first, last):
-  global ALL_USERS
-
+def lookup(first, last, all_users):
   results = []
-  if not ALL_USERS:
-      return results
+  if not all_users:
+    return results
 
   # 2 args provided
   if last:
     query1 = first.lower()
     query2 = last.lower()
-    for entry in ALL_USERS:
+    for entry in all_users:
       first_name = entry.get("first", "").lower()
       last_name = entry.get("last", "").lower()
       if query1 in first_name and query2 in last_name:
@@ -38,13 +31,13 @@ def lookup(first, last):
 
   # 1 arg provided
   else:
-    query = first.lower()
-    for entry in ALL_USERS:
+    q = first.lower()
+    for entry in all_users:
       first_name = entry.get("first", "").lower()
       last_name = entry.get("last", "").lower()
       email = entry.get("email", "").lower()
       uname = entry.get("username", "").lower()
-      if query in first_name or query in last_name or query in email or query in uname:
+      if q in first_name or q in last_name or q in email or q in uname:
         results.append(entry)
 
   return results
@@ -52,6 +45,9 @@ def lookup(first, last):
 def main():
   # update lookup table if last_run >= 7 days ago
   query.main()
+
+  with open(LOOKUP_PATH, "r") as f:
+    all_users = json.load(f)
 
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument(
@@ -68,8 +64,8 @@ def main():
 
   args = parser.parse_args()
   print(f"Looking up [ {args.firstname}, {args.lastname if args.lastname else 'None'} ]")
-  results = lookup(args.firstname, args.lastname)
-  if results == []:
+  results = lookup(args.firstname, args.lastname, all_users)
+  if not results:
     print("No entries found")
   else:
     df = pd.DataFrame(results).sort_values("last")

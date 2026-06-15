@@ -20,6 +20,8 @@ truststore.inject_into_ssl()
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TIMESTAMP_PATH = os.path.join(SCRIPT_DIR, "last_run.timestamp")
 LOOKUP_PATH = os.path.join(SCRIPT_DIR, "lookup.json")
+RAW_PATH = os.path.join(SCRIPT_DIR, "raw.json")
+CACHE_TTL = 604800
 
 TESTING_MODE = False
 
@@ -46,7 +48,7 @@ def run_check():
     return True
   if not os.path.isfile(LOOKUP_PATH):
     return True
-  return int(time.time()) - last_epoch > 604800
+  return int(time.time()) - last_epoch > CACHE_TTL
 
 def get(endpoint, access_token, token_expiration_epoch, session):
   access_token, token_expiration_epoch = check_token_expiration(access_token, token_expiration_epoch)
@@ -59,20 +61,16 @@ def get(endpoint, access_token, token_expiration_epoch, session):
   response = session.get(url, headers=headers)
   return response, access_token, token_expiration_epoch
 
-def get_first_last(full):
-  parts = full.split()
-  return parts[0], parts[-1] if len(parts) > 1 else ""
-
 def get_position(full):
   pos = full.get("position")
   email = full.get("email")
-  if email and re.search(r"@rundle.ab.ca", email, re.IGNORECASE):
+  if email and re.search(r"@rundle\.ab\.ca$", email, re.IGNORECASE):
     return "Staff"
   if not pos:
     return None
-  match = re.search(r'(EGY)(\d{4})', pos, re.IGNORECASE)
+  match = re.search(r'EGY(\d{4})', pos, re.IGNORECASE)
   if match:
-    egy = int(match.group(2))
+    egy = int(match.group(1))
     today = date.today()
     current_grad_year = today.year if today.month < 9 else today.year + 1
     grade = 12 - (egy - current_grad_year)
@@ -85,17 +83,19 @@ def get_position(full):
 
 def parse(user):
   username = user.get("username", "")
-  if username and (re.search(r"@", username) or re.search(r"-\d", username)):
+  if username and ("@" in username or re.search(r"-\d", username)):
     return None
+
+  realname = user.get("realname") or ""
+  parts = realname.split()
 
   return {
     "email": user.get("email"),
-    "first": user.get("realname").split()[0] if user.get("realname") else "",
-    "last": user.get("realname").split()[-1] if user.get("realname") else "",
-    "full": user.get("realname"),
-    "username": user.get("email").split("@")[0] if user.get("email") else user.get("username"),
+    "first": parts[0] if parts else "",
+    "last": parts[-1] if len(parts) > 1 else parts[0] if parts else "",
+    "full": realname or None,
+    "username": user.get("email").split("@")[0] if user.get("email") else username,
     "position": get_position(user),
-    # "building": user.get("building").split("Rundle")[-1]
   }
 
 def dedup(users):
@@ -106,70 +106,63 @@ def dedup(users):
     if identifier not in seen:
       seen.add(identifier)
       unique_users.append(u)
-  users = unique_users
-  return users
+  return unique_users
 
 def create_timestamp():
-  epoch = int(time.time())
-  epoch_str = str(epoch)
   try:
     with open(TIMESTAMP_PATH, "w") as f:
-      f.write(epoch_str)
-    print("Succesfully created last_run.timestamp")
-  except Exception as e:
+      f.write(str(int(time.time())))
+    print("Successfully created last_run.timestamp")
+  except OSError as e:
     print(f"Error writing .timestamp: {e}")
-  return
 
 # ============================================================================================================================================================
 
 def main():
-  if not run_check() and TESTING_MODE == False:
+  if not run_check() and not TESTING_MODE:
     return
 
   # create jamf access token
   access_token, expires_in = get_token()
   token_expiration_epoch = int(time.time()) + expires_in
-  print(f"Token valid for {expires_in} seconds")
 
-  # print jamf pro version
-  version_url = f"{JAMF_URL}/api/v1/jamf-pro-version"
-  headers = {"Authorization": f"Bearer {access_token}"}
-  version = requests.get(version_url, headers=headers)
-  print("Jamf Pro version:", version.json()["version"])
-
-  # get all users + handle pagination
-  session = make_session()
-  raw = { "total": 0, "responses": [] }
-  page = 0
-  endpoint = f"/api/v1/users?page={page}&page-size=1000&sort=realname%3Aasc&platform=false"
-  response, access_token, token_expiration_epoch = get(endpoint, access_token, token_expiration_epoch, session)
-  # do while hasNext is true
-  while True:
-    raw["responses"].extend(response.json()["results"])
-    if not response.json()["hasNext"]:
-      break
-    page += 1
+  try:
+    # get all users + handle pagination
+    session = make_session()
+    raw = { "total": 0, "responses": [] }
+    page = 0
     endpoint = f"/api/v1/users?page={page}&page-size=1000&sort=realname%3Aasc&platform=false"
     response, access_token, token_expiration_epoch = get(endpoint, access_token, token_expiration_epoch, session)
+    # do while hasNext is true
+    while True:
+      data = response.json()
+      raw["responses"].extend(data["results"])
+      if not data["hasNext"]:
+        break
+      page += 1
+      endpoint = f"/api/v1/users?page={page}&page-size=1000&sort=realname%3Aasc&platform=false"
+      response, access_token, token_expiration_epoch = get(endpoint, access_token, token_expiration_epoch, session)
 
-  # write raw
-  for _ in raw["responses"]:
-    raw["total"] += 1
-  with open("raw.json", "w") as f:
-    json.dump(response.json(), f, indent=2, sort_keys=True)
+    # write raw
+    raw["total"] = len(raw["responses"])
+    with open(RAW_PATH, "w") as f:
+      json.dump(raw, f, indent=2, sort_keys=True)
 
-  # cleanup raw
-  users = [parse(u) for u in raw["responses"]]
-  users = [u for u in users if u and u["email"] and u["first"] and u["last"]]
-  users_final = dedup(users)
+    # cleanup raw
+    users = [parse(u) for u in raw["responses"]]
+    users = [u for u in users if u and u["email"] and u["first"] and u["last"]]
+    users_final = dedup(users)
 
-  # write cleaned
-  with open("lookup.json", "w") as f:
-    json.dump(users_final, f, indent=2, sort_keys=False)
-  print(f"Successfully created lookup.json with {len(users_final)} entries")
+    # write cleaned
+    with open(LOOKUP_PATH, "w") as f:
+      json.dump(users_final, f, indent=2, sort_keys=False)
+    print(f"Successfully created lookup.json with {len(users_final)} entries")
 
-  create_timestamp()
-  print("Done query.py\n")
+    create_timestamp()
+    print("Done query.py\n")
+
+  finally:
+    invalidate_token(access_token)
 
 # ============================================================================================================================================================
 
