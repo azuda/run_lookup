@@ -72,13 +72,16 @@ def get_position(full):
   if match:
     egy = int(match.group(1))
     today = date.today()
-    current_grad_year = today.year if today.month < 9 else today.year + 1
+    current_grad_year = today.year if today.month < 7 else today.year + 1
     grade = 12 - (egy - current_grad_year)
     if grade == 0:
       return "K"
     if 1 <= grade <= 12:
       return f"Grade {grade}"
     return "Alumni"
+  match = re.search(r'Grade\s*0*(\d{1,2})', pos, re.IGNORECASE)
+  if match:
+    return f"Grade {match.group(1)}"
   return None
 
 def parse(user):
