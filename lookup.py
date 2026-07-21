@@ -53,6 +53,7 @@ def main():
   parser.add_argument(
     "firstname",
     metavar="identifier/firstname",
+    nargs="?",
     help="identifier to lookup (first / last / email) OR first name if 2nd arg provided"
   )
   parser.add_argument(
@@ -61,8 +62,25 @@ def main():
     nargs="?",
     help="[optional] last name to lookup"
   )
+  parser.add_argument(
+    "-r",
+    action="store_true",
+    help="refresh cached user list"
+  )
 
   args = parser.parse_args()
+  if not args.r and not args.firstname:
+    parser.print_help()
+    return
+
+  if args.r:
+    if os.path.isfile(LOOKUP_PATH):
+      os.remove(LOOKUP_PATH)
+      print("Cleared cache")
+
+  if not args.firstname:
+    return
+
   print(f"Looking up [ {args.firstname}, {args.lastname if args.lastname else 'None'} ]")
   results = lookup(args.firstname, args.lastname, all_users)
   if not results:
