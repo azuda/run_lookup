@@ -6,16 +6,12 @@
 """
 
 from datetime import date
-from jamf_credential import JAMF_URL, check_token_expiration, get_token, invalidate_token
+import jamf_client
+from jamf_client import jamf_get, jamf_session
 import json
 import os
 import re
-import requests
 import time
-import truststore
-import urllib3
-
-truststore.inject_into_ssl()
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TIMESTAMP_PATH = os.path.join(SCRIPT_DIR, "last_run.timestamp")
@@ -27,19 +23,6 @@ TESTING_MODE = False
 
 # ============================================================================================================================================================
 
-def make_session():
-  session = requests.Session()
-  retry = urllib3.util.retry.Retry(
-    total=3,
-    backoff_factor=0.5,
-    status_forcelist=[429, 500, 502, 503, 504],
-    allowed_methods=["GET", "PATCH"],
-    raise_on_status=False,
-  )
-  adapter = requests.adapters.HTTPAdapter(max_retries=retry)
-  session.mount("https://", adapter)
-  return session
-
 def run_check():
   try:
     with open(TIMESTAMP_PATH, "r") as f:
@@ -49,17 +32,6 @@ def run_check():
   if not os.path.isfile(LOOKUP_PATH):
     return True
   return int(time.time()) - last_epoch > CACHE_TTL
-
-def get(endpoint, access_token, token_expiration_epoch, session):
-  access_token, token_expiration_epoch = check_token_expiration(access_token, token_expiration_epoch)
-
-  url = f"{JAMF_URL}{endpoint}"
-  headers = {
-    "accept": "application/json",
-    "authorization": f"Bearer {access_token}"
-  }
-  response = session.get(url, headers=headers)
-  return response, access_token, token_expiration_epoch
 
 def get_position(full):
   pos = full.get("position")
@@ -125,17 +97,14 @@ def main():
   if not run_check() and not TESTING_MODE:
     return
 
-  # create jamf access token
-  access_token, expires_in = get_token()
-  token_expiration_epoch = int(time.time()) + expires_in
+  jamf_client.init()
 
-  try:
+  with jamf_session() as (token, session):
     # get all users + handle pagination
-    session = make_session()
     raw = { "total": 0, "responses": [] }
     page = 0
     endpoint = f"/api/v1/users?page={page}&page-size=1000&sort=realname%3Aasc&platform=false"
-    response, access_token, token_expiration_epoch = get(endpoint, access_token, token_expiration_epoch, session)
+    response = jamf_get(endpoint, token, session)
     # do while hasNext is true
     while True:
       data = response.json()
@@ -144,7 +113,7 @@ def main():
         break
       page += 1
       endpoint = f"/api/v1/users?page={page}&page-size=1000&sort=realname%3Aasc&platform=false"
-      response, access_token, token_expiration_epoch = get(endpoint, access_token, token_expiration_epoch, session)
+      response = jamf_get(endpoint, token, session)
 
     # write raw
     raw["total"] = len(raw["responses"])
@@ -163,9 +132,6 @@ def main():
 
     create_timestamp()
     print("Done query.py\n")
-
-  finally:
-    invalidate_token(access_token)
 
 # ============================================================================================================================================================
 

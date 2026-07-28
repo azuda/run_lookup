@@ -1,4 +1,2 @@
-dotenv==0.9.9
+-e ../jamf_client[truststore]
 pandas==2.3.3
-requests==2.32.5
-truststore==0.10.4
