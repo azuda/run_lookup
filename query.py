@@ -33,7 +33,7 @@ def run_check():
     return True
   return int(time.time()) - last_epoch > CACHE_TTL
 
-def get_position(full):
+def get_grade(full):
   pos = full.get("position")
   email = full.get("email")
   if email and re.search(r"@rundle\.ab\.ca$", email, re.IGNORECASE):
@@ -56,7 +56,87 @@ def get_position(full):
     return f"Grade {match.group(1)}"
   return None
 
-def parse(user):
+def build_location_map(token, session):
+  location_map = {}
+
+  response = jamf_get("/api/v1/buildings?page=0&page-size=100&sort=id%3Aasc", token, session)
+  buildings_by_id = {b["id"]: b["name"] for b in response.json()["results"]}
+
+  # computers-inventory: building only carries an id, resolve via the lookup above
+  page = 0
+  endpoint = f"/api/v3/computers-inventory?section=GENERAL&section=USER_AND_LOCATION&page={page}&page-size=1000&sort=id%3Aasc"
+  response = jamf_get(endpoint, token, session)
+  computers = []
+  while True:
+    data = response.json()
+    computers.extend(data["results"])
+    if len(computers) >= data["totalCount"]:
+      break
+    page += 1
+    endpoint = f"/api/v3/computers-inventory?section=GENERAL&section=USER_AND_LOCATION&page={page}&page-size=1000&sort=id%3Aasc"
+    response = jamf_get(endpoint, token, session)
+  for c in computers:
+    ual = c.get("userAndLocation") or {}
+    email = ual.get("email")
+    if not email:
+      continue
+    location_map[email.lower()] = {
+      "position": ual.get("position"),
+      "building": buildings_by_id.get(ual.get("buildingId")),
+    }
+
+  # mobile-devices: building name is embedded directly
+  page = 0
+  endpoint = f"/api/v2/mobile-devices/detail?section=GENERAL&section=USER_AND_LOCATION&page={page}&page-size=1000&sort=deviceId%3Aasc"
+  response = jamf_get(endpoint, token, session)
+  devices = []
+  while True:
+    data = response.json()
+    devices.extend(data["results"])
+    if len(devices) >= data["totalCount"]:
+      break
+    page += 1
+    endpoint = f"/api/v2/mobile-devices/detail?section=GENERAL&section=USER_AND_LOCATION&page={page}&page-size=1000&sort=deviceId%3Aasc"
+    response = jamf_get(endpoint, token, session)
+  for d in devices:
+    ual = d.get("userAndLocation") or {}
+    email = ual.get("emailAddress")
+    if not email:
+      continue
+    location_map[email.lower()] = {
+      "position": ual.get("position"),
+      "building": ual.get("building"),
+    }
+
+  return location_map
+
+def _match_school(text):
+  if not text:
+    return None
+  if re.search(r"College Society", text, re.IGNORECASE):
+    return "Society"
+  if re.search(r"College (Junior|Senior) High", text, re.IGNORECASE):
+    return "Conklin"
+  if re.search(r"College (Elementary|Primary)", text, re.IGNORECASE):
+    return "Collett"
+  if re.search(r"Academy", text, re.IGNORECASE):
+    return "Academy"
+  return None
+
+def get_school(user, location_map):
+  email = user.get("email")
+  if not email:
+    return None
+  location = location_map.get(email.lower())
+  if not location:
+    return None
+  for field in ("position", "building"):
+    school = _match_school(location.get(field))
+    if school:
+      return school
+  return None
+
+def parse(user, location_map):
   username = user.get("username", "")
   if username and ("@" in username or re.search(r"-\d", username)):
     return None
@@ -70,7 +150,8 @@ def parse(user):
     "last": parts[-1] if len(parts) > 1 else parts[0] if parts else "",
     "full": realname or None,
     "username": user.get("email").split("@")[0] if user.get("email") else username,
-    "position": get_position(user),
+    "grade": get_grade(user),
+    "school": get_school(user, location_map),
   }
 
 def dedup(users):
@@ -120,8 +201,11 @@ def main():
     with open(RAW_PATH, "w") as f:
       json.dump(raw, f, indent=2, sort_keys=True)
 
+    # build email -> position/building map for get_school()
+    location_map = build_location_map(token, session)
+
     # cleanup raw
-    users = [parse(u) for u in raw["responses"]]
+    users = [parse(u, location_map) for u in raw["responses"]]
     users = [u for u in users if u and u["email"] and u["first"] and u["last"]]
     users_final = dedup(users)
 
