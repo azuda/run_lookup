@@ -5,13 +5,16 @@
 - write email, first, last, fullname, username to .json
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 import jamf_client
 from jamf_client import jamf_get, jamf_session
 import json
 import os
 import re
+import threading
 import time
+import xml.etree.ElementTree as ET
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TIMESTAMP_PATH = os.path.join(SCRIPT_DIR, "last_run.timestamp")
@@ -20,6 +23,8 @@ RAW_PATH = os.path.join(SCRIPT_DIR, "raw.json")
 CACHE_TTL = 604800
 
 TESTING_MODE = False
+
+token_lock = threading.Lock()
 
 # ============================================================================================================================================================
 
@@ -56,91 +61,52 @@ def get_grade(full):
     return f"Grade {match.group(1)}"
   return None
 
-def build_location_map(token, session):
-  location_map = {}
+def get_sites(user_id, token, session):
+  # the classic API's JSON output always returns sites as null, so this has to read the XML
+  with token_lock:
+    if int(time.time()) > token.expiration - 15:
+      token.access_token, expires_in = jamf_client.get_token()
+      token.expiration = int(time.time()) + expires_in
+  response = session.get(
+    f"{jamf_client.get_jamf_url()}/JSSResource/users/id/{user_id}",
+    headers={"accept": "application/xml", "authorization": f"Bearer {token.access_token}"},
+    timeout=30,
+  )
+  if not response.ok:
+    return []
+  root = ET.fromstring(response.content)
+  return [name.text for name in root.findall("./sites/site/name") if name.text]
 
-  response = jamf_get("/api/v1/buildings?page=0&page-size=100&sort=id%3Aasc", token, session)
-  buildings_by_id = {b["id"]: b["name"] for b in response.json()["results"]}
+def build_site_map(users, token, session):
+  # site assignments only exist on the classic per-user record, so fetch them concurrently
+  with ThreadPoolExecutor(max_workers=8) as pool:
+    sites = pool.map(lambda u: get_sites(u["id"], token, session), users)
+    return {u["id"]: s for u, s in zip(users, sites)}
 
-  # computers-inventory: building only carries an id, resolve via the lookup above
-  page = 0
-  endpoint = f"/api/v3/computers-inventory?section=GENERAL&section=USER_AND_LOCATION&page={page}&page-size=1000&sort=id%3Aasc"
-  response = jamf_get(endpoint, token, session)
-  computers = []
-  while True:
-    data = response.json()
-    computers.extend(data["results"])
-    if len(computers) >= data["totalCount"]:
-      break
-    page += 1
-    endpoint = f"/api/v3/computers-inventory?section=GENERAL&section=USER_AND_LOCATION&page={page}&page-size=1000&sort=id%3Aasc"
-    response = jamf_get(endpoint, token, session)
-  for c in computers:
-    ual = c.get("userAndLocation") or {}
-    email = ual.get("email")
-    if not email:
-      continue
-    location_map[email.lower()] = {
-      "position": ual.get("position"),
-      "building": buildings_by_id.get(ual.get("buildingId")),
-    }
+def get_school(user, site_map):
+  # "Rundle College Elementary" -> "College", "Rundle Academy Senior High" -> "Academy"
+  # "Rundle College Society" is its own school -> "Society"
+  # users assigned to sites in more than one school get all of them, e.g. "Academy/College"
+  schools = []
+  for site in site_map.get(user.get("id"), []):
+    if re.search(r"College Society", site, re.IGNORECASE):
+      school = "Society"
+    else:
+      words = re.sub(r"^Rundle\s+", "", site.strip(), flags=re.IGNORECASE).split()
+      school = words[0] if words else None
+    if school and school not in schools:
+      schools.append(school)
+  return "/".join(sorted(schools)) or None
 
-  # mobile-devices: building name is embedded directly
-  page = 0
-  endpoint = f"/api/v2/mobile-devices/detail?section=GENERAL&section=USER_AND_LOCATION&page={page}&page-size=1000&sort=deviceId%3Aasc"
-  response = jamf_get(endpoint, token, session)
-  devices = []
-  while True:
-    data = response.json()
-    devices.extend(data["results"])
-    if len(devices) >= data["totalCount"]:
-      break
-    page += 1
-    endpoint = f"/api/v2/mobile-devices/detail?section=GENERAL&section=USER_AND_LOCATION&page={page}&page-size=1000&sort=deviceId%3Aasc"
-    response = jamf_get(endpoint, token, session)
-  for d in devices:
-    ual = d.get("userAndLocation") or {}
-    email = ual.get("emailAddress")
-    if not email:
-      continue
-    location_map[email.lower()] = {
-      "position": ual.get("position"),
-      "building": ual.get("building"),
-    }
-
-  return location_map
-
-def _match_school(text):
-  if not text:
-    return None
-  if re.search(r"College Society", text, re.IGNORECASE):
-    return "Society"
-  if re.search(r"College (Junior|Senior) High", text, re.IGNORECASE):
-    return "Conklin"
-  if re.search(r"College (Elementary|Primary)", text, re.IGNORECASE):
-    return "Collett"
-  if re.search(r"Academy", text, re.IGNORECASE):
-    return "Academy"
-  return None
-
-def get_school(user, location_map):
-  email = user.get("email")
-  if not email:
-    return None
-  location = location_map.get(email.lower())
-  if not location:
-    return None
-  for field in ("position", "building"):
-    school = _match_school(location.get(field))
-    if school:
-      return school
-  return None
-
-def parse(user, location_map):
+def is_excluded(user):
   username = user.get("username", "")
-  if username and ("@" in username or re.search(r"-\d", username)):
+  return bool(username and ("@" in username or re.search(r"-\d", username)))
+
+def parse(user, site_map):
+  if is_excluded(user):
     return None
 
+  username = user.get("username", "")
   realname = user.get("realname") or ""
   parts = realname.split()
 
@@ -151,7 +117,7 @@ def parse(user, location_map):
     "full": realname or None,
     "username": user.get("email").split("@")[0] if user.get("email") else username,
     "grade": get_grade(user),
-    "school": get_school(user, location_map),
+    # "school": get_school(user, site_map),
   }
 
 def dedup(users):
@@ -201,11 +167,11 @@ def main():
     with open(RAW_PATH, "w") as f:
       json.dump(raw, f, indent=2, sort_keys=True)
 
-    # build email -> position/building map for get_school()
-    location_map = build_location_map(token, session)
+    # build user id -> site name map for get_school(), skipping users parse() drops anyway
+    site_map = build_site_map([u for u in raw["responses"] if not is_excluded(u)], token, session)
 
     # cleanup raw
-    users = [parse(u, location_map) for u in raw["responses"]]
+    users = [parse(u, site_map) for u in raw["responses"]]
     users = [u for u in users if u and u["email"] and u["first"] and u["last"]]
     users_final = dedup(users)
 
